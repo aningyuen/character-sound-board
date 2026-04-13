@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Character Sound Board</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+  <script src="https://unpkg.com/ml5@1/dist/ml5.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Tone.js/14.7.77/Tone.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #111; color: #eee; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; padding: 20px; gap: 16px; }
+    h1 { font-size: 18px; font-weight: 500; letter-spacing: 0.05em; }
+    #debug-canvas { border: 1px solid #333; border-radius: 8px; }
+    #start-btn { padding: 12px 32px; font-size: 15px; background: #fff; color: #111; border: none; border-radius: 8px; cursor: pointer; }
+    #start-btn:hover { background: #ddd; }
+    #layers { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+    .layer-card {
+      width: 130px; padding: 12px; border-radius: 10px;
+      border: 1.5px solid #333; text-align: center;
+      transition: border-color 0.3s, background 0.3s;
+    }
+    .layer-card.active { border-color: #7fff7f; background: #1a2e1a; }
+    .layer-card .part { font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: #888; margin-bottom: 4px; }
+    .layer-card .label { font-size: 14px; font-weight: 500; }
+    .layer-card .conf { font-size: 11px; color: #666; margin-top: 4px; }
+    #status { font-size: 13px; color: #888; }
+  </style>
+</head>
+<body>
+
+<h1>Character Sound Board</h1>
+<button id="start-btn">Start</button>
+<p id="status">Press Start to begin</p>
+<canvas id="debug-canvas" width="640" height="480"></canvas>
+
+<div id="layers">
+  <div class="layer-card" id="card-face">
+    <div class="part">Face / Lead</div>
+    <div class="label" id="label-face">—</div>
+    <div class="conf" id="conf-face"></div>
+  </div>
+  <div class="layer-card" id="card-torso">
+    <div class="part">Torso / Chords</div>
+    <div class="label" id="label-torso">—</div>
+    <div class="conf" id="conf-torso"></div>
+  </div>
+  <div class="layer-card" id="card-legs">
+    <div class="part">Legs / Bass</div>
+    <div class="label" id="label-legs">—</div>
+    <div class="conf" id="conf-legs"></div>
+  </div>
+  <div class="layer-card" id="card-feet">
+    <div class="part">Feet / Beat</div>
+    <div class="label" id="label-feet">—</div>
+    <div class="conf" id="conf-feet"></div>
+  </div>
+</div>
+
+<script>
+// ─────────────────────────────────────────────
+// 1. PASTE YOUR TEACHABLE MACHINE MODEL URLS HERE
+// ─────────────────────────────────────────────
+const MODEL_URLS = {
+  face:  'https://teachablemachine.withgoogle.com/models/3qXN17jzh/',
+  torso: 'https://teachablemachine.withgoogle.com/models/WQtoczZDX/',
+  legs:  'https://teachablemachine.withgoogle.com/models/jHpXXsc_il/',
+  feet:  'https://teachablemachine.withgoogle.com/models/Y4T_8edcn/',
+};
+
+// ─────────────────────────────────────────────
+// 2. PASTE YOUR ZONES FROM THE COORDINATE TOOL
+//    (x, y = top-left corner; w, h = width/height)
+// ─────────────────────────────────────────────
+const ZONES = {
+  face:  { x: 20,  y: 24, w: 124, h: 314 },
+  torso: { x: 146, y: 18, w: 109, h: 327 },
+  legs:  { x: 280, y: 22, w: 76,  h: 318 },
+  feet:  { x: 357, y: 18, w: 117, h: 331 },
+};
+
+// ─────────────────────────────────────────────
+// 3. MAP YOUR SOUND FILES TO EACH CLASS LABEL
+//    The key must exactly match the class name
+//    you used in Teachable Machine.
+// ─────────────────────────────────────────────
+const SOUNDS = {
+  face: {
+    'face_v1': 'sounds/lead_v1.mp3',
+    'face_v2': 'sounds/lead_v2.mp3',
+    'face_v3': 'sounds/lead_v3.mp3',
+    'face_v4': 'sounds/lead_v4.mp3',
+    'empty':   null,
+  },
+  torso: {
+    'torso_v1': 'sounds/chords_v1.mp3',
+    'torso_v2': 'sounds/chords_v2.mp3',
+    'torso_v3': 'sounds/chords_v3.mp3',
+    'torso_v4': 'sounds/chords_v4.mp3',
+    'empty':    null,
+  },
+  legs: {
+    'legs_v1': 'sounds/bass_v1.mp3',
+    'legs_v2': 'sounds/bass_v2.mp3',
+    'legs_v3': 'sounds/bass_v3.mp3',
+    'legs_v4': 'sounds/bass_v4.mp3',
+    'empty':   null,
+  },
+  feet: {
+    'feet_v1': 'sounds/beat_v1.mp3',
+    'feet_v2': 'sounds/beat_v2.mp3',
+    'feet_v3': 'sounds/beat_v3.mp3',
+    'feet_v4': 'sounds/beat_v4.mp3',
+    'empty':   null,
+  },
+};
+
+// ─────────────────────────────────────────────
+// CONFIG
+// ─────────────────────────────────────────────
+const CONFIDENCE_THRESHOLD = 0.85; // only act if model is this confident
+const STABLE_FRAMES = 10;          // hold prediction for N frames before switching
+
+// ─────────────────────────────────────────────
+// INTERNALS — no need to edit below this line
+// ─────────────────────────────────────────────
+const PARTS = ['face', 'torso', 'legs', 'feet'];
+let video, models = {}, players = {}, classifiers = {};
+let currentClass = { face: null, torso: null, legs: null, feet: null };
+let stableCount =  { face: 0,    torso: 0,    legs: 0,    feet: 0 };
+let pendingClass = { face: null, torso: null, legs: null, feet: null };
+let running = false;
+
+const canvas = document.getElementById('debug-canvas');
+const ctx = canvas.getContext('2d');
+const offscreen = document.createElement('canvas');
+offscreen.width = 224; offscreen.height = 224;
+const offCtx = offscreen.getContext('2d');
+
+const ZONE_COLORS = { face: '#E24B4A', torso: '#378ADD', legs: '#1D9E75', feet: '#EF9F27' };
+
+// Preload all Tone.js players
+function preloadSounds() {
+  PARTS.forEach(part => {
+    players[part] = {};
+    const map = SOUNDS[part];
+    Object.entries(map).forEach(([label, path]) => {
+      if (path) {
+        players[part][label] = new Tone.Player({
+          url: path,
+          loop: true,
+          autostart: false,
+        }).toDestination();
+      }
+    });
+  });
+}
+
+async function loadModels() {
+  document.getElementById('status').textContent = 'Loading AI models...';
+  for (const part of PARTS) {
+    models[part] = await ml5.imageClassifier(MODEL_URLS[part] + 'model.json');
+  }
+  document.getElementById('status').textContent = 'Models loaded. Running...';
+}
+
+function cropZone(part) {
+  const z = ZONES[part];
+  offscreen.width = z.w;
+  offscreen.height = z.h;
+  offCtx.drawImage(video, z.x, z.y, z.w, z.h, 0, 0, z.w, z.h);
+  return offscreen;
+}
+
+async function classifyAll() {
+  for (const part of PARTS) {
+    const cropped = cropZone(part);
+    const results = await models[part].classify(cropped);
+    const top = results[0];
+    if (top.confidence >= CONFIDENCE_THRESHOLD) {
+      if (top.label === pendingClass[part]) {
+        stableCount[part]++;
+      } else {
+        pendingClass[part] = top.label;
+        stableCount[part] = 1;
+      }
+      if (stableCount[part] >= STABLE_FRAMES && top.label !== currentClass[part]) {
+        switchSound(part, top.label);
+        currentClass[part] = top.label;
+      }
+      updateCard(part, top.label, top.confidence);
+    }
+  }
+}
+
+function switchSound(part, label) {
+  // Stop all players for this part
+  Object.values(players[part]).forEach(p => { try { p.stop(); } catch(e){} });
+  // Start the new one if it exists
+  if (players[part][label]) {
+    Tone.start().then(() => {
+      players[part][label].start();
+    });
+  }
+}
+
+function updateCard(part, label, conf) {
+  document.getElementById('label-' + part).textContent = label;
+  document.getElementById('conf-' + part).textContent = (conf * 100).toFixed(0) + '%';
+  document.getElementById('card-' + part).classList.toggle('active', label !== 'empty');
+}
+
+function drawDebug() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (video && video.readyState >= 2) {
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  }
+  PARTS.forEach(part => {
+    const z = ZONES[part];
+    ctx.strokeStyle = ZONE_COLORS[part];
+    ctx.lineWidth = 2;
+    ctx.strokeRect(z.x, z.y, z.w, z.h);
+    ctx.fillStyle = ZONE_COLORS[part];
+    ctx.font = '13px sans-serif';
+    ctx.fillText(part.toUpperCase(), z.x + 4, z.y + 16);
+  });
+}
+
+async function mainLoop() {
+  if (!running) return;
+  drawDebug();
+  await classifyAll();
+  requestAnimationFrame(mainLoop);
+}
+
+document.getElementById('start-btn').onclick = async () => {
+  document.getElementById('start-btn').disabled = true;
+  document.getElementById('status').textContent = 'Starting camera...';
+
+  video = document.createElement('video');
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { width: 640, height: 480, facingMode: 'environment' }
+  });
+  video.srcObject = stream;
+  video.play();
+
+  preloadSounds();
+  await loadModels();
+  running = true;
+  mainLoop();
+};
+</script>
+</body>
+</html>
